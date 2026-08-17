@@ -124,6 +124,9 @@ def do_compress_work(file_list, output_file, fmt_info, level, password, log_call
         else:
             archive_type = "7z" if cmd_type == "7z" else "zip"
             cmd = [seven_zip, "a", f"-t{archive_type}", f"-mx{level}", "-mmt=on", "-bb1", "-y"]
+            if archive_type == "7z":
+                # 7z快速模式: 小字典(1m) + 少快速字节(32)，压缩速度提升3-5倍
+                cmd.append("-m0=LZMA2:d=1m:fb=32")
             if password:
                 cmd.append(f"-p{password}")
                 if archive_type == "zip":
@@ -213,10 +216,10 @@ class QuickCompressDialog:
         opt_row = ttk.Frame(frame)
         opt_row.pack(fill=tk.X, pady=8)
         ttk.Label(opt_row, text="格式：").pack(side=tk.LEFT)
-        self.fmt_var = tk.StringVar(value="7z")
+        self.fmt_var = tk.StringVar(value="zip")
         ttk.Combobox(opt_row, textvariable=self.fmt_var, values=[f["name"] for f in COMPRESS_FORMATS], state="readonly", width=8).pack(side=tk.LEFT, padx=4)
         ttk.Label(opt_row, text="等级：").pack(side=tk.LEFT, padx=(12,0))
-        self.level_var = tk.StringVar(value="3")
+        self.level_var = tk.StringVar(value="1")
         ttk.Combobox(opt_row, textvariable=self.level_var, values=COMPRESS_LEVELS, state="readonly", width=6).pack(side=tk.LEFT, padx=4)
         ttk.Label(frame, text="密码（仅7z/zip，留空不加密）：").pack(anchor=tk.W)
         self.pwd_var = tk.StringVar()
