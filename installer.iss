@@ -1,4 +1,4 @@
-﻿; CompressTool Installer
+; CompressTool Installer
 #define MyAppName "CompressTool"
 #define MyAppVersion "1.1.0"
 #define MyAppExeName "压缩解压工具.exe"
@@ -16,6 +16,7 @@ Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
+SetupIconFile=app_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Tasks]
