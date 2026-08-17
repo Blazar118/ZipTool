@@ -62,7 +62,7 @@ def do_extract_work(archive_path, out_dir, password, log_callback=None):
         if log_callback:
             log_callback(f"开始解压 {archive.name} -> {out}")
         seven_zip = SEVEN_ZIP or "7z"
-        cmd = [seven_zip, "x", "-y", f"-o{out}", str(archive)]
+        cmd = [seven_zip, "x", "-mmt=on", "-bb1", "-y", f"-o{out}", str(archive)]
         if password:
             cmd.insert(2, f"-p{password}")
         else:
@@ -109,7 +109,7 @@ def do_compress_work(file_list, output_file, fmt_info, level, password, log_call
                         log_callback(line.strip())
             if code1 != 0:
                 return False, "tar打包失败"
-            cmd2 = [seven_zip, "a", "-tgzip", f"-mx{level}", "-y", str(out_path), tar_path]
+            cmd2 = [seven_zip, "a", "-tgzip", f"-mx{level}", "-mmt=on", "-bb1", "-y", str(out_path), tar_path]
             code2, out2, err2 = run_cmd(cmd2, timeout=300)
             if log_callback:
                 for line in (out2 + err2).splitlines():
@@ -123,7 +123,7 @@ def do_compress_work(file_list, output_file, fmt_info, level, password, log_call
                 return False, "gzip压缩失败"
         else:
             archive_type = "7z" if cmd_type == "7z" else "zip"
-            cmd = [seven_zip, "a", f"-t{archive_type}", f"-mx{level}", "-y"]
+            cmd = [seven_zip, "a", f"-t{archive_type}", f"-mx{level}", "-mmt=on", "-bb1", "-y"]
             if password:
                 cmd.append(f"-p{password}")
                 if archive_type == "zip":
@@ -216,7 +216,7 @@ class QuickCompressDialog:
         self.fmt_var = tk.StringVar(value="7z")
         ttk.Combobox(opt_row, textvariable=self.fmt_var, values=[f["name"] for f in COMPRESS_FORMATS], state="readonly", width=8).pack(side=tk.LEFT, padx=4)
         ttk.Label(opt_row, text="等级：").pack(side=tk.LEFT, padx=(12,0))
-        self.level_var = tk.StringVar(value="6")
+        self.level_var = tk.StringVar(value="3")
         ttk.Combobox(opt_row, textvariable=self.level_var, values=COMPRESS_LEVELS, state="readonly", width=6).pack(side=tk.LEFT, padx=4)
         ttk.Label(frame, text="密码（仅7z/zip，留空不加密）：").pack(anchor=tk.W)
         self.pwd_var = tk.StringVar()
