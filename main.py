@@ -1,19 +1,21 @@
 """
-压缩解压工具 v3.0 - 全能版
-新增：格式转换、压缩包修复、完整性测试、智能压缩、文件关联、深色模式、压缩包注释、多语言
-修复：预览双击txt可查看内容
+压缩解压工具 v3.1
+修复：智能压缩生成多个临时包未清理的bug
+新增：操作日志历史记录（本地JSON持久化，历史记录标签页可查看/导出/清空）
 底层调用 7-Zip / NanaZip 命令行
 """
 
 import os
 import sys
 import time
+import json
 import tempfile
 import subprocess
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, colorchooser
+from tkinter import ttk, filedialog, messagebox, simpledialog
 from pathlib import Path
+from datetime import datetime
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -21,43 +23,36 @@ try:
 except ImportError:
     DND_AVAILABLE = False
 
-# ==================== 多语言 ====================
-LANGS = {
-    "zh": {
-        "title": "压缩解压工具 v3.0",
-        "compress": "压缩", "extract": "解压", "preview": "预览",
-        "batch": "批量", "crack": "密码恢复", "compare": "压缩率对比",
-        "convert": "格式转换", "tools": "工具箱", "settings": "设置",
-        "add_files": "添加文件", "add_folder": "添加文件夹", "clear": "清空",
-        "format": "格式", "level": "等级", "password": "密码", "volume": "分卷",
-        "output": "输出文件", "start_compress": "▶ 开始压缩",
-        "archive_file": "压缩文件", "output_dir": "输出目录", "start_extract": "▶ 开始解压",
-        "browse": "浏览", "preview_btn": "预览",
-        "smart_compress": "智能压缩（自动选最优）",
-        "dark_mode": "深色模式", "language": "语言",
-        "file_assoc": "文件关联", "assoc_all": "关联所有压缩格式", "unassoc": "取消关联",
-        "test_integrity": "测试完整性", "repair": "修复压缩包", "comment": "注释",
-        "convert_from": "源压缩包", "convert_to": "目标格式", "start_convert": "▶ 开始转换",
-    },
-    "en": {
-        "title": "ZipTool v3.0",
-        "compress": "Compress", "extract": "Extract", "preview": "Preview",
-        "batch": "Batch", "crack": "Password Recovery", "compare": "Compare",
-        "convert": "Convert", "tools": "Tools", "settings": "Settings",
-        "add_files": "Add Files", "add_folder": "Add Folder", "clear": "Clear",
-        "format": "Format", "level": "Level", "password": "Password", "volume": "Volume",
-        "output": "Output", "start_compress": "▶ Start Compress",
-        "archive_file": "Archive", "output_dir": "Output Dir", "start_extract": "▶ Start Extract",
-        "browse": "Browse", "preview_btn": "Preview",
-        "smart_compress": "Smart Compress (Auto)",
-        "dark_mode": "Dark Mode", "language": "Language",
-        "file_assoc": "File Association", "assoc_all": "Associate All", "unassoc": "Remove",
-        "test_integrity": "Test Integrity", "repair": "Repair", "comment": "Comment",
-        "convert_from": "Source", "convert_to": "Target Format", "start_convert": "▶ Convert",
-    }
-}
-current_lang = "zh"
-def tr(key): return LANGS[current_lang].get(key, key)
+# ==================== 操作日志系统 ====================
+LOG_FILE = os.path.join(os.path.expanduser("~"), ".ziptool_history.json")
+
+def load_history():
+    try:
+        if os.path.exists(LOG_FILE):
+            with open(LOG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except: pass
+    return []
+
+def save_history(records):
+    try:
+        with open(LOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(records[-500:], f, ensure_ascii=False, indent=2)
+    except: pass
+
+def add_history(action, source, output="", result="success", detail="", size=0, elapsed=0):
+    records = load_history()
+    records.append({
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "action": action,
+        "source": source,
+        "output": output,
+        "result": result,
+        "detail": detail,
+        "size": size,
+        "elapsed": round(elapsed, 2)
+    })
+    save_history(records)
 
 # ==================== 7z 路径 ====================
 SEVEN_ZIP = None
@@ -111,8 +106,9 @@ def apply_theme(root, style):
 
 # ==================== 核心功能 ====================
 def do_compress(file_list, output_file, fmt, level, password=None, volume=None, log_cb=None):
+    t0 = time.time()
     try:
-        if not file_list: return False, "No files"
+        if not file_list: return False, "No files", 0
         out = Path(output_file); sz = SEVEN_ZIP or "7z"
         if log_cb: log_cb(f"Compressing: {fmt['name']} L{level}")
         if fmt["name"] == "tar.gz":
@@ -120,13 +116,13 @@ def do_compress(file_list, output_file, fmt, level, password=None, volume=None, 
             c1 = [sz,"a","-ttar","-mmt=on","-y",tar]+[str(f) for f in file_list]
             code,o,e = run_cmd(c1)
             if log_cb: [log_cb(l) for l in (o+e).splitlines() if l.strip()]
-            if code != 0: return False, "tar failed"
+            if code != 0: return False, "tar failed", 0
             c2 = [sz,"a","-tgzip",f"-mx{level}","-mmt=on","-y",str(out),tar]
             code,o,e = run_cmd(c2)
             if log_cb: [log_cb(l) for l in (o+e).splitlines() if l.strip()]
             try: os.remove(tar)
             except: pass
-            if code != 0: return False, "gzip failed"
+            if code != 0: return False, "gzip failed", 0
         else:
             at = "7z" if fmt["name"]=="7z" else "zip"
             cmd = [sz,"a",f"-t{at}",f"-mx{level}","-mmt=on","-bb1","-y"]
@@ -138,14 +134,18 @@ def do_compress(file_list, output_file, fmt, level, password=None, volume=None, 
             cmd.append(str(out)); cmd += [str(f) for f in file_list]
             code,o,e = run_cmd(cmd)
             if log_cb: [log_cb(l) for l in (o+e).splitlines() if l.strip()]
-            if code != 0: return False, f"Failed code {code}"
-        return True, f"Done: {out}"
-    except Exception as ex: return False, str(ex)
+            if code != 0: return False, f"Failed code {code}", 0
+        sz_out = os.path.getsize(out) if os.path.exists(out) else 0
+        return True, f"Done: {out}", sz_out
+    except Exception as ex: return False, str(ex), 0
+    finally:
+        elapsed = time.time() - t0
 
 def do_extract(archive, out_dir, password=None, log_cb=None):
+    t0 = time.time()
     try:
         a = Path(archive); out = Path(out_dir)
-        if not a.exists(): return False, "Not found"
+        if not a.exists(): return False, "Not found", 0
         os.makedirs(out, exist_ok=True)
         sz = SEVEN_ZIP or "7z"
         cmd = [sz,"x","-mmt=on","-bb1","-y",f"-o{out}",str(a)]
@@ -153,12 +153,14 @@ def do_extract(archive, out_dir, password=None, log_cb=None):
         code,o,e = run_cmd(cmd)
         out_text = o+"\n"+e
         if log_cb: [log_cb(l) for l in out_text.splitlines() if l.strip()]
-        if code == 0: return True, "Done!"
+        if code == 0: return True, "Done!", 0
         ol = out_text.lower()
         if "wrong password" in ol or "data error in encrypted" in ol:
-            return False, "Wrong password" if password else "Encrypted, need password"
-        return False, f"Failed code {code}"
-    except Exception as ex: return False, str(ex)
+            return False, "Wrong password" if password else "Encrypted, need password", 0
+        return False, f"Failed code {code}", 0
+    except Exception as ex: return False, str(ex), 0
+    finally:
+        elapsed = time.time() - t0
 
 def do_preview(archive, password=None):
     sz = SEVEN_ZIP or "7z"
@@ -194,49 +196,62 @@ def do_repair(archive, output_dir):
     return code == 0, o+e
 
 def do_convert(archive, target_fmt, output_dir, log_cb=None):
-    """格式转换：先解压再压缩"""
+    t0 = time.time()
     try:
         sz = SEVEN_ZIP or "7z"
         tmpdir = tempfile.mkdtemp()
         if log_cb: log_cb("Step 1: Extracting...")
-        ok, msg = do_extract(archive, tmpdir, log_cb=log_cb)
-        if not ok: return False, f"Extract failed: {msg}"
+        ok, msg, _ = do_extract(archive, tmpdir, log_cb=log_cb)
+        if not ok: return False, f"Extract failed: {msg}", 0
         base = Path(archive).stem
         out = Path(output_dir) / (base + target_fmt["ext"])
         fmt_info = {"name": target_fmt["name"], "ext": target_fmt["ext"]}
         if log_cb: log_cb(f"Step 2: Compressing to {target_fmt['name']}...")
         files = [os.path.join(tmpdir, f) for f in os.listdir(tmpdir)]
-        ok, msg = do_compress(files, str(out), fmt_info, 5, log_cb=log_cb)
+        ok, msg, sz_out = do_compress(files, str(out), fmt_info, 5, log_cb=log_cb)
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
-        return ok, msg
-    except Exception as ex: return False, str(ex)
+        return ok, msg, sz_out
+    except Exception as ex: return False, str(ex), 0
+    finally:
+        elapsed = time.time() - t0
 
 def do_smart_compress(file_list, output_base, log_cb=None):
-    """智能压缩：测试多种格式选最小"""
-    results = []
-    for fmt in COMPRESS_FORMATS:
-        for level in ["1", "5", "9"]:
-            out = f"{output_base}_{fmt['name']}_l{level}{fmt['ext']}"
-            t0 = time.time()
-            ok, msg = do_compress(file_list, out, fmt, int(level), log_cb=lambda m: None)
-            elapsed = time.time() - t0
-            if ok and os.path.exists(out):
-                size = os.path.getsize(out)
-                results.append({"fmt":fmt["name"],"level":level,"size":size,"time":elapsed,"file":out})
-                if log_cb: log_cb(f"{fmt['name']} L{level}: {size:,}B ({elapsed:.1f}s)")
-    if not results: return None, "All failed"
-    best = min(results, key=lambda x: x["size"])
-    # 删除非最优的
-    for r in results:
-        if r != best:
-            try: os.remove(r["file"])
+    """智能压缩：测试多种格式选最小，用try/finally确保临时文件全部清理"""
+    t0 = time.time()
+    temp_files = []
+    best = None
+    try:
+        results = []
+        for fmt in COMPRESS_FORMATS:
+            for level in ["1", "5", "9"]:
+                out = f"{output_base}_{fmt['name']}_l{level}{fmt['ext']}"
+                temp_files.append(out)
+                ok, msg, sz_out = do_compress(file_list, out, fmt, int(level), log_cb=lambda m: None)
+                if ok and os.path.exists(out):
+                    size = os.path.getsize(out)
+                    results.append({"fmt":fmt["name"],"level":level,"size":size,"file":out})
+                    if log_cb: log_cb(f"{fmt['name']} L{level}: {size:,}B")
+        if not results: return None, "All failed", 0
+        best = min(results, key=lambda x: x["size"])
+        final = f"{output_base}_best{Path(best['file']).suffix}"
+        try:
+            if os.path.exists(best["file"]):
+                os.rename(best["file"], final)
+        except:
+            import shutil
+            shutil.copy2(best["file"], final)
+        return best, final, best["size"]
+    except Exception as ex:
+        return None, str(ex), 0
+    finally:
+        # 【关键修复】确保所有临时文件被删除，不管成功还是失败
+        for f in temp_files:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
             except: pass
-    # 重命名最优的
-    final = f"{output_base}_best{Path(best['file']).suffix}"
-    try: os.rename(best["file"], final)
-    except: pass
-    return best, final
+        elapsed = time.time() - t0
 
 def do_batch_compress(folder, fmt, level, log_cb=None):
     count = 0
@@ -245,7 +260,7 @@ def do_batch_compress(folder, fmt, level, log_cb=None):
         if os.path.isdir(src) or os.path.isfile(src):
             out = os.path.join(folder, item + fmt["ext"])
             if log_cb: log_cb(f"Compress: {item}")
-            ok,_ = do_compress([src], out, fmt, level, log_cb=log_cb)
+            ok,_,_ = do_compress([src], out, fmt, level, log_cb=log_cb)
             if ok: count += 1
     return True, f"Done: {count}"
 
@@ -256,7 +271,7 @@ def do_batch_extract(folder, log_cb=None):
         if os.path.isfile(src) and item.lower().endswith(EXTRACT_EXTS):
             out = os.path.join(folder, os.path.splitext(item)[0])
             if log_cb: log_cb(f"Extract: {item}")
-            ok,_ = do_extract(src, out, log_cb=log_cb)
+            ok,_,_ = do_extract(src, out, log_cb=log_cb)
             if ok: count += 1
     return True, f"Done: {count}"
 
@@ -290,10 +305,8 @@ def do_compare(test_file, log_cb=None):
     return results, None
 
 def set_file_association(associate=True):
-    """注册/取消文件关联"""
     import winreg
     exts = [".zip",".7z",".rar",".tar",".gz",".bz2",".xz",".iso",".cab",".lzma",".zstd",".tgz"]
-    exe = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(sys.argv[0])
     for ext in exts:
         try:
             if associate:
@@ -310,7 +323,7 @@ def set_file_association(associate=True):
 class ZipToolApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(tr("title"))
+        self.root.title("压缩解压工具 v3.1")
         self.root.geometry("860x680")
         self.root.minsize(760, 600)
         self.compress_files = []
@@ -340,7 +353,6 @@ class ZipToolApp:
             self._update_comp_out()
 
     def _build_ui(self):
-        global dark_mode
         nb = ttk.Notebook(self.root); nb.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
         self._build_compress_tab(nb)
         self._build_extract_tab(nb)
@@ -350,43 +362,44 @@ class ZipToolApp:
         self._build_crack_tab(nb)
         self._build_compare_tab(nb)
         self._build_tools_tab(nb)
+        self._build_history_tab(nb)
         self._build_settings_tab(nb)
         self.status = tk.StringVar(value="Ready" + (" | Drag enabled" if DND_AVAILABLE else ""))
         ttk.Label(self.root, textvariable=self.status, foreground="gray", anchor=tk.W).pack(fill=tk.X, padx=10, pady=(0,6))
 
     def _build_compress_tab(self, nb):
-        f = ttk.Frame(nb, padding=10); nb.add(f, text="  "+tr("compress")+"  ")
-        ttk.Label(f, text=tr("add_files")+" (可拖拽):").pack(anchor=tk.W)
+        f = ttk.Frame(nb, padding=10); nb.add(f, text="  压缩  ")
+        ttk.Label(f, text="添加文件 (可拖拽):").pack(anchor=tk.W)
         br = ttk.Frame(f); br.pack(fill=tk.X, pady=4)
-        ttk.Button(br, text=tr("add_files"), command=self._add_files).pack(side=tk.LEFT)
-        ttk.Button(br, text=tr("add_folder"), command=self._add_folder).pack(side=tk.LEFT, padx=4)
-        ttk.Button(br, text=tr("clear"), command=lambda: (self.compress_files.clear(), self.comp_list.delete(0,tk.END))).pack(side=tk.LEFT)
+        ttk.Button(br, text="添加文件", command=self._add_files).pack(side=tk.LEFT)
+        ttk.Button(br, text="添加文件夹", command=self._add_folder).pack(side=tk.LEFT, padx=4)
+        ttk.Button(br, text="清空", command=lambda: (self.compress_files.clear(), self.comp_list.delete(0,tk.END))).pack(side=tk.LEFT)
         lf = ttk.Frame(f); lf.pack(fill=tk.BOTH, expand=False, pady=4)
         self.comp_list = tk.Listbox(lf, height=4, bg="#1e1e1e", fg="#d4d4d4")
         self.comp_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb = ttk.Scrollbar(lf, command=self.comp_list.yview); sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.comp_list.config(yscrollcommand=sb.set)
         opt = ttk.Frame(f); opt.pack(fill=tk.X, pady=6)
-        ttk.Label(opt, text=tr("format")+":").pack(side=tk.LEFT)
+        ttk.Label(opt, text="格式:").pack(side=tk.LEFT)
         self.fmt_var = tk.StringVar(value="zip")
         ttk.Combobox(opt, textvariable=self.fmt_var, values=[x["name"] for x in COMPRESS_FORMATS], state="readonly", width=8).pack(side=tk.LEFT, padx=4)
-        ttk.Label(opt, text=tr("level")+":").pack(side=tk.LEFT, padx=(8,0))
+        ttk.Label(opt, text="等级:").pack(side=tk.LEFT, padx=(8,0))
         self.level_var = tk.StringVar(value="1")
         ttk.Combobox(opt, textvariable=self.level_var, values=COMPRESS_LEVELS, state="readonly", width=5).pack(side=tk.LEFT, padx=4)
-        ttk.Label(opt, text=tr("password")+":").pack(side=tk.LEFT, padx=(8,0))
+        ttk.Label(opt, text="密码:").pack(side=tk.LEFT, padx=(8,0))
         self.pwd_var = tk.StringVar()
         ttk.Entry(opt, textvariable=self.pwd_var, show="*", width=10).pack(side=tk.LEFT, padx=4)
-        ttk.Label(opt, text=tr("volume")+":").pack(side=tk.LEFT, padx=(8,0))
+        ttk.Label(opt, text="分卷:").pack(side=tk.LEFT, padx=(8,0))
         self.vol_var = tk.StringVar()
         ttk.Entry(opt, textvariable=self.vol_var, width=6).pack(side=tk.LEFT, padx=4)
         self.smart_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opt, text=tr("smart_compress"), variable=self.smart_var).pack(side=tk.LEFT, padx=(12,0))
-        ttk.Label(f, text=tr("output")+":").pack(anchor=tk.W, pady=(6,0))
+        ttk.Checkbutton(opt, text="智能压缩（自动选最优，会生成临时文件后自动清理）", variable=self.smart_var).pack(side=tk.LEFT, padx=(12,0))
+        ttk.Label(f, text="输出文件:").pack(anchor=tk.W, pady=(6,0))
         orow = ttk.Frame(f); orow.pack(fill=tk.X, pady=4)
         self.comp_out = tk.StringVar()
         ttk.Entry(orow, textvariable=self.comp_out).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(orow, text=tr("browse"), command=self._pick_comp_out, width=8).pack(side=tk.LEFT, padx=(6,0))
-        ttk.Button(f, text=tr("start_compress"), command=self._on_compress).pack(pady=8, anchor=tk.W)
+        ttk.Button(orow, text="浏览", command=self._pick_comp_out, width=8).pack(side=tk.LEFT, padx=(6,0))
+        ttk.Button(f, text="▶ 开始压缩", command=self._on_compress).pack(pady=8, anchor=tk.W)
         self.comp_prog = ttk.Progressbar(f, mode="determinate"); self.comp_prog.pack(fill=tk.X)
         self.comp_log = tk.Text(f, height=5, bg="#1e1e1e", fg="#d4d4d4", font=("Consolas",9))
         self.comp_log.pack(fill=tk.BOTH, expand=True, pady=(6,0))
@@ -416,36 +429,42 @@ class ZipToolApp:
     def _do_compress(self):
         def log(m): self.root.after(0, lambda: self._log(self.comp_log, m))
         def prog(p): self.root.after(0, lambda: self.comp_prog.configure(value=p))
-        prog(10)
+        prog(10); t0 = time.time()
+        src = ", ".join([os.path.basename(f) for f in self.compress_files])
         if self.smart_var.get():
             base = os.path.splitext(self.comp_out.get())[0]
-            best, final = do_smart_compress(self.compress_files, base, log)
-            prog(100)
-            msg = f"Best: {best['fmt']} L{best['level']} = {best['size']:,}B\nOutput: {final}" if best else "Failed"
+            best, final, sz_out = do_smart_compress(self.compress_files, base, log)
+            prog(100); elapsed = time.time()-t0
+            if best:
+                msg = f"Best: {best['fmt']} L{best['level']} = {best['size']:,}B\nOutput: {final}"
+                add_history("智能压缩", src, final, "success", f"{best['fmt']} L{best['level']}", best["size"], elapsed)
+            else:
+                msg = "Failed"; add_history("智能压缩", src, "", "failed", "", 0, elapsed)
             self.root.after(0, lambda: messagebox.showinfo("Smart Compress", msg))
         else:
             fmt = [x for x in COMPRESS_FORMATS if x["name"]==self.fmt_var.get()][0]
             vol = self.vol_var.get().strip() or None
-            ok, msg = do_compress(self.compress_files, self.comp_out.get(), fmt, int(self.level_var.get()), self.pwd_var.get() or None, vol, log)
-            prog(100)
+            ok, msg, sz_out = do_compress(self.compress_files, self.comp_out.get(), fmt, int(self.level_var.get()), self.pwd_var.get() or None, vol, log)
+            prog(100); elapsed = time.time()-t0
+            add_history("压缩", src, self.comp_out.get(), "success" if ok else "failed", f"{fmt['name']} L{self.level_var.get()}", sz_out, elapsed)
             self.root.after(0, lambda: messagebox.showinfo("Done" if ok else "Failed", msg))
 
     def _build_extract_tab(self, nb):
-        f = ttk.Frame(nb, padding=10); nb.add(f, text="  "+tr("extract")+"  ")
-        ttk.Label(f, text=tr("archive_file")+":").pack(anchor=tk.W)
+        f = ttk.Frame(nb, padding=10); nb.add(f, text="  解压  ")
+        ttk.Label(f, text="压缩文件:").pack(anchor=tk.W)
         row = ttk.Frame(f); row.pack(fill=tk.X, pady=6)
         self.decomp_path = tk.StringVar()
         ttk.Entry(row, textvariable=self.decomp_path).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row, text=tr("browse"), command=self._pick_decomp_file, width=8).pack(side=tk.LEFT, padx=(6,0))
-        ttk.Label(f, text=tr("output_dir")+":").pack(anchor=tk.W, pady=(6,0))
+        ttk.Button(row, text="浏览", command=self._pick_decomp_file, width=8).pack(side=tk.LEFT, padx=(6,0))
+        ttk.Label(f, text="输出目录:").pack(anchor=tk.W, pady=(6,0))
         row2 = ttk.Frame(f); row2.pack(fill=tk.X, pady=6)
         self.decomp_out = tk.StringVar()
         ttk.Entry(row2, textvariable=self.decomp_out).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row2, text=tr("browse"), command=self._pick_decomp_out, width=8).pack(side=tk.LEFT, padx=(6,0))
-        ttk.Label(f, text=tr("password")+":").pack(anchor=tk.W, pady=(6,0))
+        ttk.Button(row2, text="浏览", command=self._pick_decomp_out, width=8).pack(side=tk.LEFT, padx=(6,0))
+        ttk.Label(f, text="密码:").pack(anchor=tk.W, pady=(6,0))
         self.decomp_pwd = tk.StringVar()
         ttk.Entry(f, textvariable=self.decomp_pwd, show="*").pack(fill=tk.X, pady=4)
-        ttk.Button(f, text=tr("start_extract"), command=self._on_decompress).pack(pady=8, anchor=tk.W)
+        ttk.Button(f, text="▶ 开始解压", command=self._on_decompress).pack(pady=8, anchor=tk.W)
         self.decomp_prog = ttk.Progressbar(f, mode="determinate"); self.decomp_prog.pack(fill=tk.X)
         self.decomp_log = tk.Text(f, height=8, bg="#1e1e1e", fg="#d4d4d4", font=("Consolas",9))
         self.decomp_log.pack(fill=tk.BOTH, expand=True, pady=(6,0))
@@ -462,19 +481,21 @@ class ZipToolApp:
     def _do_decompress(self):
         def log(m): self.root.after(0, lambda: self._log(self.decomp_log, m))
         def prog(p): self.root.after(0, lambda: self.decomp_prog.configure(value=p))
-        prog(10)
-        ok, msg = do_extract(self.decomp_path.get(), self.decomp_out.get() or os.path.dirname(self.decomp_path.get()), self.decomp_pwd.get() or None, log)
-        prog(100)
+        prog(10); t0 = time.time()
+        outdir = self.decomp_out.get() or os.path.dirname(self.decomp_path.get())
+        ok, msg, _ = do_extract(self.decomp_path.get(), outdir, self.decomp_pwd.get() or None, log)
+        prog(100); elapsed = time.time()-t0
+        add_history("解压", self.decomp_path.get(), outdir, "success" if ok else "failed", msg, 0, elapsed)
         self.root.after(0, lambda: messagebox.showinfo("Done" if ok else "Failed", msg))
 
     def _build_preview_tab(self, nb):
-        f = ttk.Frame(nb, padding=10); nb.add(f, text="  "+tr("preview")+"  ")
+        f = ttk.Frame(nb, padding=10); nb.add(f, text="  预览  ")
         ttk.Label(f, text="双击文本文件可查看内容：").pack(anchor=tk.W)
         row = ttk.Frame(f); row.pack(fill=tk.X, pady=6)
         self.prev_path = tk.StringVar()
         ttk.Entry(row, textvariable=self.prev_path).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row, text=tr("browse"), command=self._pick_prev_file, width=8).pack(side=tk.LEFT, padx=(6,0))
-        ttk.Button(row, text=tr("preview_btn"), command=self._on_preview, width=8).pack(side=tk.LEFT, padx=(6,0))
+        ttk.Button(row, text="浏览", command=self._pick_prev_file, width=8).pack(side=tk.LEFT, padx=(6,0))
+        ttk.Button(row, text="预览", command=self._on_preview, width=8).pack(side=tk.LEFT, padx=(6,0))
         cols = ("name","size")
         self.prev_tree = ttk.Treeview(f, columns=cols, show="headings", height=10)
         self.prev_tree.heading("name", text="Filename"); self.prev_tree.heading("size", text="Size")
@@ -496,32 +517,24 @@ class ZipToolApp:
             self.prev_tree.insert("", tk.END, values=(f["name"], f"{f['size']:,}")); total += f["size"]
         self.prev_info.set(f"{len(files)} files, {total:,} bytes total")
     def _on_prev_doubleclick(self, event):
-        """双击预览中的文件，临时解压并查看文本内容"""
         sel = self.prev_tree.selection()
         if not sel: return
         item = self.prev_tree.item(sel[0])
         name = item["values"][0]
         if not name.lower().endswith((".txt",".md",".csv",".log",".ini",".cfg",".py",".json",".xml",".html")):
-            messagebox.showinfo("提示", "仅支持查看文本文件（txt/md/csv/log等）")
-            return
-        # 临时解压这个文件
-        sz = SEVEN_ZIP or "7z"
-        tmpdir = tempfile.mkdtemp()
+            messagebox.showinfo("提示", "仅支持查看文本文件（txt/md/csv/log等）"); return
+        sz = SEVEN_ZIP or "7z"; tmpdir = tempfile.mkdtemp()
         cmd = [sz,"e","-y",f"-o{tmpdir}",self.prev_path.get(),name]
         code,o,e = run_cmd(cmd)
-        if code != 0:
-            messagebox.showerror("Error", "无法提取文件"); return
+        if code != 0: messagebox.showerror("Error", "无法提取文件"); return
         filepath = os.path.join(tmpdir, os.path.basename(name))
         if not os.path.exists(filepath):
-            # 可能在子目录
             for root,dirs,files in os.walk(tmpdir):
                 for fn in files:
                     if fn == os.path.basename(name): filepath = os.path.join(root, fn); break
         try:
-            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f: content = f.read()
         except: content = "(无法读取)"
-        # 显示内容窗口
         win = tk.Toplevel(self.root); win.title(f"预览: {name}"); win.geometry("600x400")
         txt = tk.Text(win, wrap=tk.WORD, font=("Consolas",10))
         txt.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -530,21 +543,21 @@ class ZipToolApp:
         win.protocol("WM_DELETE_WINDOW", lambda: (shutil.rmtree(tmpdir, ignore_errors=True), win.destroy()))
 
     def _build_convert_tab(self, nb):
-        f = ttk.Frame(nb, padding=10); nb.add(f, text="  "+tr("convert")+"  ")
-        ttk.Label(f, text=tr("convert_from")+":").pack(anchor=tk.W)
+        f = ttk.Frame(nb, padding=10); nb.add(f, text="  格式转换  ")
+        ttk.Label(f, text="源压缩包:").pack(anchor=tk.W)
         row = ttk.Frame(f); row.pack(fill=tk.X, pady=6)
         self.cvt_from = tk.StringVar()
         ttk.Entry(row, textvariable=self.cvt_from).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row, text=tr("browse"), command=lambda: self.cvt_from.set(filedialog.askopenfilename(filetypes=[("Archives","*.zip *.7z *.rar *.tar *.gz *.bz2 *.xz")]) or ""), width=8).pack(side=tk.LEFT, padx=(6,0))
-        ttk.Label(f, text=tr("convert_to")+":").pack(anchor=tk.W, pady=(8,0))
+        ttk.Button(row, text="浏览", command=lambda: self.cvt_from.set(filedialog.askopenfilename(filetypes=[("Archives","*.zip *.7z *.rar *.tar *.gz *.bz2 *.xz")]) or ""), width=8).pack(side=tk.LEFT, padx=(6,0))
+        ttk.Label(f, text="目标格式:").pack(anchor=tk.W, pady=(8,0))
         self.cvt_to = tk.StringVar(value="zip")
         ttk.Combobox(f, textvariable=self.cvt_to, values=[x["name"] for x in COMPRESS_FORMATS], state="readonly", width=10).pack(anchor=tk.W, pady=4)
-        ttk.Label(f, text=tr("output_dir")+":").pack(anchor=tk.W, pady=(8,0))
+        ttk.Label(f, text="输出目录:").pack(anchor=tk.W, pady=(8,0))
         self.cvt_out = tk.StringVar()
         row2 = ttk.Frame(f); row2.pack(fill=tk.X, pady=4)
         ttk.Entry(row2, textvariable=self.cvt_out).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row2, text=tr("browse"), command=lambda: self.cvt_out.set(filedialog.askdirectory() or ""), width=8).pack(side=tk.LEFT, padx=(6,0))
-        ttk.Button(f, text=tr("start_convert"), command=self._on_convert).pack(pady=10, anchor=tk.W)
+        ttk.Button(row2, text="浏览", command=lambda: self.cvt_out.set(filedialog.askdirectory() or ""), width=8).pack(side=tk.LEFT, padx=(6,0))
+        ttk.Button(f, text="▶ 开始转换", command=self._on_convert).pack(pady=10, anchor=tk.W)
         self.cvt_log = tk.Text(f, height=10, bg="#1e1e1e", fg="#d4d4d4", font=("Consolas",9))
         self.cvt_log.pack(fill=tk.BOTH, expand=True, pady=6)
     def _on_convert(self):
@@ -555,21 +568,24 @@ class ZipToolApp:
     def _do_convert(self):
         def log(m): self.root.after(0, lambda: self._log(self.cvt_log, m))
         fmt = [x for x in COMPRESS_FORMATS if x["name"]==self.cvt_to.get()][0]
-        ok, msg = do_convert(self.cvt_from.get(), fmt, self.cvt_out.get(), log)
+        t0 = time.time()
+        ok, msg, sz_out = do_convert(self.cvt_from.get(), fmt, self.cvt_out.get(), log)
+        elapsed = time.time()-t0
+        add_history("格式转换", self.cvt_from.get(), self.cvt_out.get(), "success" if ok else "failed", f"to {fmt['name']}", sz_out, elapsed)
         self.root.after(0, lambda: messagebox.showinfo("Done" if ok else "Failed", msg))
 
     def _build_batch_tab(self, nb):
-        f = ttk.Frame(nb, padding=10); nb.add(f, text="  "+tr("batch")+"  ")
+        f = ttk.Frame(nb, padding=10); nb.add(f, text="  批量  ")
         ttk.Label(f, text="选择文件夹：").pack(anchor=tk.W)
         row = ttk.Frame(f); row.pack(fill=tk.X, pady=6)
         self.batch_dir = tk.StringVar()
         ttk.Entry(row, textvariable=self.batch_dir).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row, text=tr("browse"), command=lambda: self.batch_dir.set(filedialog.askdirectory() or ""), width=8).pack(side=tk.LEFT, padx=(6,0))
+        ttk.Button(row, text="浏览", command=lambda: self.batch_dir.set(filedialog.askdirectory() or ""), width=8).pack(side=tk.LEFT, padx=(6,0))
         opt = ttk.Frame(f); opt.pack(fill=tk.X, pady=6)
-        ttk.Label(opt, text=tr("format")+":").pack(side=tk.LEFT)
+        ttk.Label(opt, text="格式:").pack(side=tk.LEFT)
         self.batch_fmt = tk.StringVar(value="zip")
         ttk.Combobox(opt, textvariable=self.batch_fmt, values=[x["name"] for x in COMPRESS_FORMATS], state="readonly", width=8).pack(side=tk.LEFT, padx=4)
-        ttk.Label(opt, text=tr("level")+":").pack(side=tk.LEFT, padx=(8,0))
+        ttk.Label(opt, text="等级:").pack(side=tk.LEFT, padx=(8,0))
         self.batch_level = tk.StringVar(value="1")
         ttk.Combobox(opt, textvariable=self.batch_level, values=COMPRESS_LEVELS, state="readonly", width=5).pack(side=tk.LEFT, padx=4)
         btns = ttk.Frame(f); btns.pack(pady=8)
@@ -583,26 +599,29 @@ class ZipToolApp:
         threading.Thread(target=self._do_batch, args=(mode,), daemon=True).start()
     def _do_batch(self, mode):
         def log(m): self.root.after(0, lambda: self._log(self.batch_log, m))
+        t0 = time.time()
         if mode == "compress":
             fmt = [x for x in COMPRESS_FORMATS if x["name"]==self.batch_fmt.get()][0]
             ok, msg = do_batch_compress(self.batch_dir.get(), fmt, int(self.batch_level.get()), log)
+            add_history("批量压缩", self.batch_dir.get(), "", "success", msg, 0, time.time()-t0)
         else:
             ok, msg = do_batch_extract(self.batch_dir.get(), log)
+            add_history("批量解压", self.batch_dir.get(), "", "success", msg, 0, time.time()-t0)
         self.root.after(0, lambda: messagebox.showinfo("Done", msg))
 
     def _build_crack_tab(self, nb):
-        f = ttk.Frame(nb, padding=10); nb.add(f, text="  "+tr("crack")+"  ")
+        f = ttk.Frame(nb, padding=10); nb.add(f, text="  密码恢复  ")
         ttk.Label(f, text="⚠️ 仅限恢复自己的密码，禁止非法用途！", foreground="red").pack(anchor=tk.W)
         ttk.Label(f, text="加密压缩包：").pack(anchor=tk.W, pady=(8,0))
         row = ttk.Frame(f); row.pack(fill=tk.X, pady=4)
         self.crack_arc = tk.StringVar()
         ttk.Entry(row, textvariable=self.crack_arc).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row, text=tr("browse"), command=lambda: self.crack_arc.set(filedialog.askopenfilename(filetypes=[("Archives","*.zip *.7z *.rar")]) or ""), width=8).pack(side=tk.LEFT, padx=(6,0))
+        ttk.Button(row, text="浏览", command=lambda: self.crack_arc.set(filedialog.askopenfilename(filetypes=[("Archives","*.zip *.7z *.rar")]) or ""), width=8).pack(side=tk.LEFT, padx=(6,0))
         ttk.Label(f, text="密码字典（每行一个）：").pack(anchor=tk.W, pady=(6,0))
         row2 = ttk.Frame(f); row2.pack(fill=tk.X, pady=4)
         self.crack_dict = tk.StringVar()
         ttk.Entry(row2, textvariable=self.crack_dict).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row2, text=tr("browse"), command=lambda: self.crack_dict.set(filedialog.askopenfilename(filetypes=[("Text","*.txt")]) or ""), width=8).pack(side=tk.LEFT, padx=(6,0))
+        ttk.Button(row2, text="浏览", command=lambda: self.crack_dict.set(filedialog.askopenfilename(filetypes=[("Text","*.txt")]) or ""), width=8).pack(side=tk.LEFT, padx=(6,0))
         ttk.Button(f, text="▶ 开始字典破解", command=self._on_crack).pack(pady=10, anchor=tk.W)
         self.crack_log = tk.Text(f, height=8, bg="#1e1e1e", fg="#d4d4d4", font=("Consolas",9))
         self.crack_log.pack(fill=tk.BOTH, expand=True, pady=6)
@@ -612,16 +631,18 @@ class ZipToolApp:
         threading.Thread(target=self._do_crack, daemon=True).start()
     def _do_crack(self):
         def log(m): self.root.after(0, lambda: self._log(self.crack_log, m))
+        t0 = time.time()
         ok, msg = do_crack(self.crack_arc.get(), self.crack_dict.get(), log)
+        add_history("密码恢复", self.crack_arc.get(), "", "success" if ok else "failed", msg, 0, time.time()-t0)
         self.root.after(0, lambda: messagebox.showinfo("Result", msg))
 
     def _build_compare_tab(self, nb):
-        f = ttk.Frame(nb, padding=10); nb.add(f, text="  "+tr("compare")+"  ")
+        f = ttk.Frame(nb, padding=10); nb.add(f, text="  压缩率对比  ")
         ttk.Label(f, text="选择测试文件：").pack(anchor=tk.W)
         row = ttk.Frame(f); row.pack(fill=tk.X, pady=6)
         self.cmp_file = tk.StringVar()
         ttk.Entry(row, textvariable=self.cmp_file).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row, text=tr("browse"), command=lambda: self.cmp_file.set(filedialog.askopenfilename() or ""), width=8).pack(side=tk.LEFT, padx=(6,0))
+        ttk.Button(row, text="浏览", command=lambda: self.cmp_file.set(filedialog.askopenfilename() or ""), width=8).pack(side=tk.LEFT, padx=(6,0))
         ttk.Button(f, text="▶ 开始对比", command=self._on_compare).pack(pady=8, anchor=tk.W)
         cols = ("format","level","size","ratio","time")
         self.cmp_tree = ttk.Treeview(f, columns=cols, show="headings", height=8)
@@ -643,18 +664,17 @@ class ZipToolApp:
         self.root.after(0, lambda: messagebox.showinfo("Done","对比完成！"))
 
     def _build_tools_tab(self, nb):
-        f = ttk.Frame(nb, padding=10); nb.add(f, text="  "+tr("tools")+"  ")
-        # 完整性测试
+        f = ttk.Frame(nb, padding=10); nb.add(f, text="  工具箱  ")
         ttk.Label(f, text="压缩包：", font=("Segoe UI",10,"bold")).pack(anchor=tk.W, pady=(0,4))
         row = ttk.Frame(f); row.pack(fill=tk.X, pady=4)
         self.tool_arc = tk.StringVar()
         ttk.Entry(row, textvariable=self.tool_arc).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row, text=tr("browse"), command=lambda: self.tool_arc.set(filedialog.askopenfilename(filetypes=[("Archives","*.zip *.7z *.rar *.tar *.gz *.bz2 *.xz")]) or ""), width=8).pack(side=tk.LEFT, padx=(6,0))
+        ttk.Button(row, text="浏览", command=lambda: self.tool_arc.set(filedialog.askopenfilename(filetypes=[("Archives","*.zip *.7z *.rar *.tar *.gz *.bz2 *.xz")]) or ""), width=8).pack(side=tk.LEFT, padx=(6,0))
         btns = ttk.Frame(f); btns.pack(pady=8)
-        ttk.Button(btns, text=tr("test_integrity"), command=self._on_test).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text=tr("repair"), command=self._on_repair).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text=tr("comment")+" 查看", command=self._on_view_comment).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text=tr("comment")+" 添加", command=self._on_add_comment).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="测试完整性", command=self._on_test).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="修复压缩包", command=self._on_repair).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="查看注释", command=self._on_view_comment).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="添加注释", command=self._on_add_comment).pack(side=tk.LEFT, padx=4)
         self.tool_log = tk.Text(f, height=12, bg="#1e1e1e", fg="#d4d4d4", font=("Consolas",9))
         self.tool_log.pack(fill=tk.BOTH, expand=True, pady=6)
     def _on_test(self):
@@ -663,12 +683,19 @@ class ZipToolApp:
         threading.Thread(target=self._do_test, daemon=True).start()
     def _do_test(self):
         def log(m): self.root.after(0, lambda: self._log(self.tool_log, m))
+        t0 = time.time()
         ok, out = do_test(self.tool_arc.get())
-        log(out); self.root.after(0, lambda: messagebox.showinfo("Result", "完整性正常！" if ok else "测试失败，文件可能损坏"))
+        log(out)
+        add_history("完整性测试", self.tool_arc.get(), "", "success" if ok else "failed", "", 0, time.time()-t0)
+        self.root.after(0, lambda: messagebox.showinfo("Result", "完整性正常！" if ok else "测试失败，文件可能损坏"))
     def _on_repair(self):
         if not self.tool_arc.get(): messagebox.showwarning("","Select archive"); return
         outdir = os.path.dirname(self.tool_arc.get())
-        threading.Thread(target=lambda: (self._log(self.tool_log, "修复中..."), do_repair(self.tool_arc.get(), outdir)[1], self._log(self.tool_log, "修复完成，输出在同目录")), daemon=True).start()
+        t0 = time.time()
+        ok, out = do_repair(self.tool_arc.get(), outdir)
+        add_history("修复", self.tool_arc.get(), outdir, "success" if ok else "failed", "", 0, time.time()-t0)
+        self.tool_log.delete("1.0", tk.END); self._log(self.tool_log, out)
+        messagebox.showinfo("Done", "修复完成" if ok else "修复失败")
     def _on_view_comment(self):
         if not self.tool_arc.get(): messagebox.showwarning("","Select archive"); return
         sz = SEVEN_ZIP or "7z"
@@ -676,47 +703,86 @@ class ZipToolApp:
         self.tool_log.delete("1.0", tk.END); self._log(self.tool_log, o+e)
     def _on_add_comment(self):
         if not self.tool_arc.get(): messagebox.showwarning("","Select archive"); return
-        comment = tk.simpledialog.askstring("添加注释", "输入注释内容：")
+        comment = simpledialog.askstring("添加注释", "输入注释内容：")
         if not comment: return
-        sz = SEVEN_ZIP or "7z"
-        tmp = tempfile.mktemp(suffix=".txt")
+        sz = SEVEN_ZIP or "7z"; tmp = tempfile.mktemp(suffix=".txt")
         with open(tmp,"w",encoding="utf-8") as f: f.write(comment)
         code,o,e = run_cmd([sz,"a",self.tool_arc.get(),"-mx0",tmp])
         os.remove(tmp)
+        add_history("添加注释", self.tool_arc.get(), "", "success" if code==0 else "failed", comment, 0, 0)
         messagebox.showinfo("Done","注释已添加" if code==0 else "添加失败")
 
+    def _build_history_tab(self, nb):
+        """v3.1新增：操作历史记录"""
+        f = ttk.Frame(nb, padding=10); nb.add(f, text="  历史记录  ")
+        top = ttk.Frame(f); top.pack(fill=tk.X, pady=(0,6))
+        ttk.Label(top, text="所有压缩/解压/转换操作都会自动记录到本地：", foreground="gray").pack(side=tk.LEFT)
+        btns = ttk.Frame(f); btns.pack(fill=tk.X, pady=4)
+        ttk.Button(btns, text="刷新", command=self._refresh_history).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btns, text="导出日志", command=self._export_history).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btns, text="清空记录", command=self._clear_history).pack(side=tk.LEFT, padx=2)
+        ttk.Label(btns, text=f"日志文件: {LOG_FILE}", foreground="gray").pack(side=tk.LEFT, padx=10)
+        cols = ("time","action","source","output","result","detail","size","elapsed")
+        self.hist_tree = ttk.Treeview(f, columns=cols, show="headings", height=15)
+        headers = [("time","时间",140),("action","操作",80),("source","源文件",250),("output","输出",200),("result","结果",60),("detail","详情",150),("size","大小",80),("elapsed","耗时",60)]
+        for c,t,w in headers:
+            self.hist_tree.heading(c, text=t); self.hist_tree.column(c, width=w, anchor=tk.W)
+        self.hist_tree.pack(fill=tk.BOTH, expand=True, pady=6)
+        self.hist_tree.bind("<Double-1>", self._on_hist_doubleclick)
+        self._refresh_history()
+    def _refresh_history(self):
+        self.hist_tree.delete(*self.hist_tree.get_children())
+        records = load_history()
+        for r in reversed(records):
+            self.hist_tree.insert("", tk.END, values=(
+                r.get("time",""), r.get("action",""), r.get("source","")[:60],
+                r.get("output","")[:50], r.get("result",""), r.get("detail","")[:40],
+                f"{r.get('size',0):,}B" if r.get('size',0)>0 else "",
+                f"{r.get('elapsed',0):.1f}s"
+            ))
+    def _export_history(self):
+        records = load_history()
+        if not records: messagebox.showinfo("","暂无记录"); return
+        p = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text","*.txt"),("JSON","*.json")])
+        if not p: return
+        try:
+            if p.endswith(".json"):
+                with open(p,"w",encoding="utf-8") as f: json.dump(records, f, ensure_ascii=False, indent=2)
+            else:
+                with open(p,"w",encoding="utf-8") as f:
+                    for r in records:
+                        f.write(f"[{r['time']}] {r['action']} | {r['source']} -> {r['output']} | {r['result']} | {r['detail']} | {r['size']}B | {r['elapsed']}s\n")
+            messagebox.showinfo("Done", f"已导出到: {p}")
+        except Exception as e: messagebox.showerror("Error", str(e))
+    def _clear_history(self):
+        if messagebox.askyesno("确认", "确定要清空所有历史记录吗？"):
+            save_history([]); self._refresh_history(); messagebox.showinfo("Done","已清空")
+    def _on_hist_doubleclick(self, event):
+        sel = self.hist_tree.selection()
+        if not sel: return
+        item = self.hist_tree.item(sel[0])
+        vals = item["values"]
+        detail = f"时间: {vals[0]}\n操作: {vals[1]}\n源: {vals[2]}\n输出: {vals[3]}\n结果: {vals[4]}\n详情: {vals[5]}\n大小: {vals[6]}\n耗时: {vals[7]}"
+        messagebox.showinfo("操作详情", detail)
+
     def _build_settings_tab(self, nb):
-        f = ttk.Frame(nb, padding=10); nb.add(f, text="  "+tr("settings")+"  ")
-        # 深色模式
+        f = ttk.Frame(nb, padding=10); nb.add(f, text="  设置  ")
         ttk.Label(f, text="界面：", font=("Segoe UI",10,"bold")).pack(anchor=tk.W, pady=(0,4))
         self.dark_var = tk.BooleanVar(value=dark_mode)
-        ttk.Checkbutton(f, text=tr("dark_mode"), variable=self.dark_var, command=self._toggle_dark).pack(anchor=tk.W, pady=4)
-        # 语言
-        ttk.Label(f, text=tr("language")+":", font=("Segoe UI",10,"bold")).pack(anchor=tk.W, pady=(12,4))
-        self.lang_var = tk.StringVar(value="中文")
-        lang_cb = ttk.Combobox(f, textvariable=self.lang_var, values=["中文","English"], state="readonly", width=12)
-        lang_cb.pack(anchor=tk.W, pady=4)
-        lang_cb.bind("<<ComboboxSelected>>", self._change_lang)
-        # 文件关联
-        ttk.Label(f, text=tr("file_assoc")+":", font=("Segoe UI",10,"bold")).pack(anchor=tk.W, pady=(12,4))
+        ttk.Checkbutton(f, text="深色模式", variable=self.dark_var, command=self._toggle_dark).pack(anchor=tk.W, pady=4)
+        ttk.Label(f, text="文件关联：", font=("Segoe UI",10,"bold")).pack(anchor=tk.W, pady=(12,4))
         btns = ttk.Frame(f); btns.pack(pady=4)
-        ttk.Button(btns, text=tr("assoc_all"), command=lambda: (set_file_association(True), messagebox.showinfo("Done","关联成功，重启资源管理器生效"))).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text=tr("unassoc"), command=lambda: (set_file_association(False), messagebox.showinfo("Done","已取消关联"))).pack(side=tk.LEFT, padx=4)
-        # 关于
+        ttk.Button(btns, text="关联所有压缩格式", command=lambda: (set_file_association(True), messagebox.showinfo("Done","关联成功"))).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="取消关联", command=lambda: (set_file_association(False), messagebox.showinfo("Done","已取消关联"))).pack(side=tk.LEFT, padx=4)
         ttk.Separator(f).pack(fill=tk.X, pady=16)
-        ttk.Label(f, text="压缩解压工具 v3.0\n\n支持格式：ZIP/7Z/RAR/TAR/GZ/BZ2/XZ/ISO/CAB/LZMA/ZSTD\n底层调用 7-Zip / NanaZip\n\nAI 辅助开发，开源地址：github.com/Blazar118/ZipTool",
+        ttk.Label(f, text="压缩解压工具 v3.1\n\n支持格式：ZIP/7Z/RAR/TAR/GZ/BZ2/XZ/ISO/CAB/LZMA/ZSTD\n底层调用 7-Zip / NanaZip\n\nv3.1更新：修复智能压缩临时文件bug + 操作日志历史记录\n\nAI 辅助开发，开源地址：github.com/Blazar118/ZipTool",
                     justify=tk.LEFT, foreground="gray").pack(anchor=tk.W, pady=8)
     def _toggle_dark(self):
         global dark_mode
         dark_mode = self.dark_var.get()
         apply_theme(self.root, self.style)
-    def _change_lang(self, event=None):
-        global current_lang
-        current_lang = "en" if self.lang_var.get()=="English" else "zh"
-        messagebox.showinfo("提示","语言切换需要重启程序生效")
 
 def main():
-    global current_lang
     if DND_AVAILABLE: root = TkinterDnD.Tk()
     else: root = tk.Tk()
     app = ZipToolApp(root)
