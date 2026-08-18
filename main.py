@@ -831,7 +831,7 @@ class ZipToolApp:
         # v3.2: 密码保险箱管理
         ttk.Label(f, text="密码保险箱：", font=("Segoe UI",10,"bold")).pack(anchor=tk.W, pady=(12,4))
         pwd_mgr = ttk.Frame(f); pwd_mgr.pack(fill=tk.X, pady=4)
-        self.pwd_listbox = tk.Listbox(pwd_mgr, height=5, bg="#1e1e1e", fg="#d4d4d4", show="*")
+        self.pwd_listbox = tk.Listbox(pwd_mgr, height=5, bg="#1e1e1e", fg="#d4d4d4")
         self.pwd_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
         pwd_btns = ttk.Frame(pwd_mgr); pwd_btns.pack(side=tk.LEFT, padx=4)
         ttk.Button(pwd_btns, text="添加", command=self._add_pwd).pack(fill=tk.X, pady=1)
@@ -847,7 +847,7 @@ class ZipToolApp:
                     justify=tk.LEFT, foreground="gray").pack(anchor=tk.W, pady=8)
     def _refresh_pwd_list(self):
         self.pwd_listbox.delete(0, tk.END)
-        for p in load_passwords(): self.pwd_listbox.insert(tk.END, p)
+        for p in load_passwords(): self.pwd_listbox.insert(tk.END, "*" * len(p))
     def _add_pwd(self):
         pwd = simpledialog.askstring("添加密码", "输入要保存的密码：", show="*")
         if pwd: add_password(pwd); self._refresh_pwd_list(); messagebox.showinfo("Done","已添加")
